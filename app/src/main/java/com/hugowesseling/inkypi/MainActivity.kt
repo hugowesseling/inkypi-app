@@ -35,93 +35,78 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.InputStream
+// ... existing imports ...
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.ui.layout.ContentScale
+import coil.compose.AsyncImage
+import com.jcraft.jsch.ChannelSftp
+import java.io.ByteArrayOutputStream
 
 class MainActivity : ComponentActivity() {
 
-    // Hardcoded Server Details
     private val SSH_HOST = "192.168.1.130"
     private val SSH_USER = "inky"
     private val SSH_PASS = "impression"
     private val REMOTE_PATH = "/home/inky/images/"
+    private val THUMBS_PATH = "/home/inky/images/thumbs/"
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        // Move these to the top level of onCreate so they can be accessed inside setContent
-        var statusMessage by mutableStateOf("Waiting for image...")
+        var statusMessage by mutableStateOf("InkyPi Gallery")
         var isUploading by mutableStateOf(false)
         var uploadProgress by mutableStateOf(0f)
+
+        // State for our gallery images (stored as ByteArrays for simplicity)
+        val thumbList = mutableStateListOf<ByteArray>()
 
         val action = intent?.action
         val type = intent?.type
 
-        if (type?.startsWith("image/") == true) {
-            val urisToUpload = mutableListOf<Uri>()
-
-            when (action) {
-                Intent.ACTION_SEND -> {
-                    // Single image
-                    val uri = if (Build.VERSION.SDK_INT >= 33) {
-                        intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        intent.getParcelableExtra(Intent.EXTRA_STREAM)
-                    }
-                    uri?.let { urisToUpload.add(it) }
-                }
-
-                Intent.ACTION_SEND_MULTIPLE -> {
-                    // Multiple images
-                    val uris = if (Build.VERSION.SDK_INT >= 33) {
-                        intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
-                    }
-                    uris?.let { urisToUpload.addAll(it) }
-                }
-            }
-
-            if (urisToUpload.isNotEmpty()) {
-                lifecycleScope.launch {
-                    isUploading = true
-                    var successCount = 0
-
-                    urisToUpload.forEachIndexed { index, imageUri ->
-                        statusMessage = "Uploading image ${index + 1} of ${urisToUpload.size}..."
-                        uploadProgress = 0f // Reset for each file
-
-                        val success = uploadImageViaSsh(imageUri) { progress ->
-                            uploadProgress = progress
-                        }
-                        if (success) successCount++
-                    }
-
-                    isUploading = false
-                    statusMessage = "Finished: $successCount/${urisToUpload.size} uploaded."
-                }
+        // 1. Handle "Share" Action (Existing logic)
+        if (type?.startsWith("image/") == true && (action == Intent.ACTION_SEND || action == Intent.ACTION_SEND_MULTIPLE)) {
+            handleShareIntent(intent, { isUploading = it }, { statusMessage = it }, { uploadProgress = it })
+        } else {
+            // 2. Handle "Normal" Start: Download Thumbs
+            lifecycleScope.launch {
+                statusMessage = "Loading Gallery..."
+                val thumbs = fetchThumbsFromSsh()
+                thumbList.addAll(thumbs)
+                statusMessage = if (thumbs.isEmpty()) "No images found." else "Gallery (${thumbs.size})"
             }
         }
+
         setContent {
             InkyPiTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    Box(
+                    Column(modifier = Modifier.padding(innerPadding)) {
+                        // Header Status
+                        Box(modifier = Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(text = statusMessage)
+                                if (isUploading) {
+                                    LinearProgressIndicator(
+                                        progress = { uploadProgress },
+                                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
+                                    )
+                                }
+                            }
+                        }
 
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(innerPadding),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        // This UI will now react to statusMessage and isUploading changes
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(text = statusMessage)
-                            if (isUploading) {
-                                Spacer(modifier = Modifier.height(16.dp))
-                                // Show the progress bar
-                                LinearProgressIndicator(
-                                    progress = { uploadProgress },
-                                    modifier = Modifier.fillMaxWidth(0.8f)
+                        // 3. The Grid View (5 images wide)
+                        LazyVerticalGrid(
+                            columns = GridCells.Fixed(5),
+                            modifier = Modifier.fillMaxSize()
+                        ) {
+                            items(thumbList) { imageData ->
+                                AsyncImage(
+                                    model = imageData,
+                                    contentDescription = null,
+                                    modifier = Modifier.height(100.dp).fillMaxWidth(),
+                                    contentScale = ContentScale.Crop
                                 )
                             }
                         }
@@ -214,6 +199,62 @@ class MainActivity : ComponentActivity() {
             false
         } finally {
             session?.disconnect()
+        }
+    }
+
+    private suspend fun fetchThumbsFromSsh(): List<ByteArray> = withContext(Dispatchers.IO) {
+        val images = mutableListOf<ByteArray>()
+        var session: Session? = null
+        try {
+            val jsch = JSch()
+            session = jsch.getSession(SSH_USER, SSH_HOST, 22)
+            session.setPassword(SSH_PASS)
+            session.setConfig("StrictHostKeyChecking", "no")
+            session.connect(10000)
+
+            val channel = session.openChannel("sftp") as ChannelSftp
+            channel.connect()
+
+            // List files in the thumbs directory
+            val files = channel.ls(THUMBS_PATH)
+            files.forEach {
+                val entry = it as ChannelSftp.LsEntry
+                if (!entry.attrs.isDir) {
+                    val out = ByteArrayOutputStream()
+                    channel.get(THUMBS_PATH + entry.filename, out)
+                    images.add(out.toByteArray())
+                }
+            }
+            channel.disconnect()
+        } catch (e: Exception) {
+            Log.e("SSH_GALLERY", "Error: ${e.message}")
+        } finally {
+            session?.disconnect()
+        }
+        return@withContext images
+    }
+
+    // Extracted share logic for cleanliness
+    private fun handleShareIntent(intent: Intent, setUploading: (Boolean) -> Unit, setStatus: (String) -> Unit, setProgress: (Float) -> Unit) {
+        val urisToUpload = mutableListOf<Uri>()
+        if (intent.action == Intent.ACTION_SEND) {
+            val uri = if (Build.VERSION.SDK_INT >= 33) intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+            else @Suppress("DEPRECATION") intent.getParcelableExtra(Intent.EXTRA_STREAM)
+            uri?.let { urisToUpload.add(it) }
+        } else {
+            val uris = if (Build.VERSION.SDK_INT >= 33) intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)
+            else @Suppress("DEPRECATION") intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
+            uris?.let { urisToUpload.addAll(it) }
+        }
+
+        lifecycleScope.launch {
+            setUploading(true)
+            urisToUpload.forEachIndexed { i, uri ->
+                setStatus("Uploading ${i+1}/${urisToUpload.size}")
+                uploadImageViaSsh(uri) { setProgress(it) }
+            }
+            setUploading(false)
+            setStatus("Upload Complete")
         }
     }
 }
