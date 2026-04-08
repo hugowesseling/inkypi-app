@@ -136,10 +136,15 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun showImageAction(filename: String) {
-        Toast.makeText(this, "Action: Show $filename", Toast.LENGTH_SHORT).show()
-        Log.d("InkyPi", "Requested Show for: $filename")
-    }
+        Toast.makeText(this, "Showing $filename on InkyPi...", Toast.LENGTH_SHORT).show()
 
+        lifecycleScope.launch {
+            val success = runRemoteCommand("/home/inky/show.sh $REMOTE_PATH$filename")
+            if (!success) {
+                Toast.makeText(this@MainActivity, "Failed to execute show command", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
     private fun deleteImageAction(filename: String) {
         Toast.makeText(this, "Action: Delete $filename", Toast.LENGTH_SHORT).show()
         Log.d("InkyPi", "Requested Delete for: $filename")
@@ -200,6 +205,40 @@ class MainActivity : ComponentActivity() {
         return result ?: "upload_${System.currentTimeMillis()}.jpg"
     }
 
+    private suspend fun runRemoteCommand(command: String): Boolean = withContext(Dispatchers.IO) {
+        var session: Session? = null
+        var channel: com.jcraft.jsch.ChannelExec? = null
+        try {
+            val jsch = JSch()
+            session = jsch.getSession(SSH_USER, SSH_HOST, 22)
+            session.setPassword(SSH_PASS)
+            session.setConfig("StrictHostKeyChecking", "no")
+            session.connect(10000)
+
+            // Open an "exec" channel instead of "sftp"
+            channel = session.openChannel("exec") as com.jcraft.jsch.ChannelExec
+            channel.setCommand(command)
+
+            // Connect the channel to execute the command
+            channel.connect()
+
+            // Wait for the command to finish (optional, but good for error checking)
+            while (!channel.isClosed) {
+                kotlinx.coroutines.delay(100)
+            }
+
+            val exitStatus = channel.exitStatus
+            Log.d("InkyPi", "Command executed: $command, Exit Status: $exitStatus")
+
+            exitStatus == 0
+        } catch (e: Exception) {
+            Log.e("InkyPi", "SSH Exec Error: ${e.message}")
+            false
+        } finally {
+            channel?.disconnect()
+            session?.disconnect()
+        }
+    }
     private suspend fun uploadImageViaSsh(uri: Uri, onProgress: (Float) -> Unit): Boolean = withContext(Dispatchers.IO) {
         var session: Session? = null
         try {
