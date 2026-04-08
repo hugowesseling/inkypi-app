@@ -122,7 +122,7 @@ class MainActivity : ComponentActivity() {
                                             text = { Text("Delete") },
                                             onClick = {
                                                 showMenu = false
-                                                deleteImageAction(inkyImage.filename)
+                                                deleteImageAction(inkyImage.filename, thumbList)
                                             }
                                         )
                                     }
@@ -145,8 +145,21 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
-    private fun deleteImageAction(filename: String) {
-        Toast.makeText(this, "Action: Delete $filename", Toast.LENGTH_SHORT).show()
+    private fun deleteImageAction(filename: String, thumbList: MutableList<InkyImage>) {
+        Toast.makeText(this, "Deleting $filename from InkyPi...", Toast.LENGTH_SHORT).show()
+
+        lifecycleScope.launch {
+            // Executes the remote deletion of both the main image and the thumbnail
+            val success = runRemoteCommand("rm $REMOTE_PATH$filename && rm $THUMBS_PATH$filename")
+
+            if (success) {
+                // Remove the item from the local list to update the UI
+                thumbList.removeAll { it.filename == filename }
+                Toast.makeText(this@MainActivity, "Deleted $filename", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this@MainActivity, "Failed to delete from server", Toast.LENGTH_SHORT).show()
+            }
+        }
         Log.d("InkyPi", "Requested Delete for: $filename")
     }
 
