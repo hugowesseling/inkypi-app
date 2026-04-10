@@ -304,13 +304,21 @@ class MainActivity : ComponentActivity() {
         }
 
         lifecycleScope.launch {
+            var lastImage:Uri? = null
             setUploading(true)
             urisToUpload.forEachIndexed { i, uri ->
                 setStatus("Uploading ${i+1}/${urisToUpload.size}")
                 uploadImageViaSsh(uri) { setProgress(it) }
+                lastImage = uri
             }
             setUploading(false)
             setStatus("Upload Complete")
+
+
+            lastImage?.let{
+                val fileName = getFileName(lastImage)
+                showImageAction(fileName)
+            }
         }
     }
 }
