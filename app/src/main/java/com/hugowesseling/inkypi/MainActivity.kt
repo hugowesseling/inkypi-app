@@ -23,6 +23,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
+import androidx.core.graphics.get
 import androidx.lifecycle.lifecycleScope
 import coil.compose.AsyncImage
 import com.hugowesseling.inkypi.ui.theme.InkyPiTheme
@@ -34,6 +35,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
+import kotlin.io.path.exists
+import kotlin.io.path.readBytes
 
 // Data class to keep track of image data and its remote filename
 data class InkyImage(val filename: String, val data: ByteArray)
@@ -156,6 +159,8 @@ class MainActivity : ComponentActivity() {
                 // Remove the item from the local list to update the UI
                 thumbList.removeAll { it.filename == filename }
                 Toast.makeText(this@MainActivity, "Deleted $filename", Toast.LENGTH_SHORT).show()
+                val localFile = java.io.File(java.io.File(cacheDir, "thumbs"), filename)
+                if (localFile.exists()) localFile.delete()
             } else {
                 Toast.makeText(this@MainActivity, "Failed to delete from server", Toast.LENGTH_SHORT).show()
             }
@@ -166,6 +171,11 @@ class MainActivity : ComponentActivity() {
     private suspend fun fetchThumbsFromSsh(): List<InkyImage> = withContext(Dispatchers.IO) {
         val images = mutableListOf<InkyImage>()
         var session: Session? = null
+
+        // Create a local directory for thumbnails in the app's cache
+        val localFolder = java.io.File(cacheDir, "thumbs")
+        if (!localFolder.exists()) localFolder.mkdirs()
+
         try {
             val jsch = JSch()
             session = jsch.getSession(SSH_USER, SSH_HOST, 22)
@@ -180,9 +190,30 @@ class MainActivity : ComponentActivity() {
             files.forEach {
                 val entry = it as ChannelSftp.LsEntry
                 if (!entry.attrs.isDir) {
-                    val out = ByteArrayOutputStream()
-                    channel.get(THUMBS_PATH + entry.filename, out)
-                    images.add(InkyImage(entry.filename, out.toByteArray()))
+                    val filename = entry.filename
+                    val localFile = java.io.File(localFolder, filename)
+
+                    // Get server modification time in milliseconds
+                    // mTime is in seconds, convert to ms
+                    val serverMTime = entry.attrs.mTime.toLong() * 1000L
+
+                    val shouldDownload = !localFile.exists() || serverMTime > localFile.lastModified()
+
+                    if (shouldDownload) {
+                        Log.d("InkyPi", "Downloading newer version of $filename")
+                        val out = java.io.FileOutputStream(localFile)
+                        channel.get(THUMBS_PATH + filename, out)
+                        out.close()
+
+                        // Sync the local file's modification date with the server
+                        localFile.setLastModified(serverMTime)
+                    } else {
+                        Log.d("InkyPi", "Using cached version of $filename")
+                    }
+
+                    // Read the data from the local file (either newly downloaded or existing)
+                    val fileBytes = localFile.readBytes()
+                    images.add(InkyImage(filename, fileBytes))
                 }
             }
             channel.disconnect()
